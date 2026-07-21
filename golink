@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""golink — personal go-links resolver + CLI."""
+import json
+import os
+from pathlib import Path
+from urllib.parse import urlsplit
+
+LINKS_PATH = Path.home() / ".golinks" / "links.json"
+
+
+def load_links(path: Path) -> dict:
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        return {}
+    text = text.strip()
+    if not text:
+        return {}
+    return json.loads(text)
+
+
+def save_links(path: Path, links: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(links, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
+def resolve(links: dict, path: str):
+    split = urlsplit(path)
+    segments = [s for s in split.path.split("/") if s != ""]
+    if not segments:
+        return None
+    name = segments[0]
+    if name not in links:
+        return None
+    target = links[name].rstrip("/")
+    rest = segments[1:]
+    if rest:
+        target = target + "/" + "/".join(rest)
+    if split.query:
+        target = target + "?" + split.query
+    return target
+
+
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs
+import html
+
+
+PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>go links</title>
+<style>
+ body{{font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px}}
+ table{{border-collapse:collapse;width:100%}} td,th{{text-align:left;padding:6px 8px;border-bottom:1px solid #eee}}
+ code{{background:#f4f4f4;padding:1px 5px;border-radius:4px}} input{{padding:6px;font:inherit}}
+ form.inline{{display:inline}} button{{font:inherit;padding:6px 10px;cursor:pointer}}
+</style></head><body>
+<h1>go links</h1>
+<table><tr><th>name</th><th>target</th><th></th></tr>{rows}</table>
+<h2>add / update</h2>
+<form method="post" action="/">
+ <input name="name" placeholder="name" required>
+ <input name="url" placeholder="https://..." size="30" required>
+ <button type="submit">save</button>
+</form>
+</body></html>"""
+
+
+def _render(links: dict) -> bytes:
+    rows = ""
+    for name in sorted(links):
+        url = links[name]
+        rows += (
+            "<tr><td><code>go/{n}</code></td><td><a href='{u}'>{u}</a></td>"
+            "<td><form class='inline' method='post' action='/delete'>"
+            "<input type='hidden' name='name' value='{n}'>"
+            "<button type='submit'>delete</button></form></td></tr>"
+        ).format(n=html.escape(name), u=html.escape(url))
+    return PAGE.format(rows=rows).encode()
+
+
+def make_handler(links_path):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _redirect(self, location, code=302):
+            self.send_response(code)
+            self.send_header("Location", location)
+            self.end_headers()
+
+        def do_GET(self):
+            links = load_links(links_path)
+            if self.path == "/" or self.path.startswith("/?"):
+                body = _render(links)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            target = resolve(links, self.path)
+            if target is None:
+                msg = b"404 no such go link\n"
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                self.wfile.write(msg)
+                return
+            self._redirect(target, 302)
+
+        def _read_form(self):
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length).decode()
+            return {k: v[0] for k, v in parse_qs(raw).items()}
+
+        def do_POST(self):
+            form = self._read_form()
+            links = load_links(links_path)
+            if self.path == "/delete":
+                links.pop(form.get("name", ""), None)
+                save_links(links_path, links)
+                self._redirect("/", 303)
+                return
+            name = form.get("name", "").strip()
+            url = form.get("url", "").strip()
+            if name and url:
+                links[name] = url
+                save_links(links_path, links)
+            self._redirect("/", 303)
+
+    return Handler
+
+
+def serve(host: str, port: int, links_path) -> None:
+    httpd = HTTPServer((host, port), make_handler(links_path))
+    httpd.serve_forever()
+
+
+import argparse
+import sys
+
+
+def cmd_add(args):
+    links = load_links(args.links)
+    links[args.name] = args.url
+    save_links(args.links, links)
+    print(f"added {args.name} -> {args.url}")
+    return 0
+
+
+def cmd_rm(args):
+    links = load_links(args.links)
+    if links.pop(args.name, None) is None:
+        print(f"no such link: {args.name}", file=sys.stderr)
+        return 1
+    save_links(args.links, links)
+    print(f"removed {args.name}")
+    return 0
+
+
+def cmd_list(args):
+    links = load_links(args.links)
+    if not links:
+        print("(no links)")
+        return 0
+    width = max(len(n) for n in links)
+    for name in sorted(links):
+        print(f"{name.ljust(width)}  {links[name]}")
+    return 0
+
+
+def cmd_serve(args):
+    serve(args.host, args.port, args.links)
+    return 0
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="golink", description="personal go-links")
+    p.add_argument("--links", type=Path, default=LINKS_PATH,
+                   help="path to links.json")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("add", help="add or update a link")
+    a.add_argument("name")
+    a.add_argument("url")
+    a.set_defaults(func=cmd_add)
+
+    r = sub.add_parser("rm", help="remove a link")
+    r.add_argument("name")
+    r.set_defaults(func=cmd_rm)
+
+    l = sub.add_parser("list", help="list links")
+    l.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("serve", help="run the resolver server")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=80)
+    s.set_defaults(func=cmd_serve)
+
+    ins = sub.add_parser("install", help="install hosts entry + launchd daemon (sudo)")
+    ins.set_defaults(func=cmd_install)
+
+    uns = sub.add_parser("uninstall", help="remove hosts entry + launchd daemon (sudo)")
+    uns.set_defaults(func=cmd_uninstall)
+
+    return p
+
+
+import subprocess
+import pwd
+
+HOSTS_PATH = Path("/etc/hosts")
+PLIST_LABEL = "com.bryan.golink"
+PLIST_PATH = Path("/Library/LaunchDaemons/com.bryan.golink.plist")
+HOSTS_MARKER = "# golink"
+HOSTS_LINE = "127.0.0.1\tgo # golink"
+
+
+def hosts_with_entry(current: str) -> str:
+    lines = [ln for ln in current.splitlines() if HOSTS_MARKER not in ln]
+    lines.append(HOSTS_LINE)
+    return "\n".join(lines) + "\n"
+
+
+def hosts_without_entry(current: str) -> str:
+    lines = [ln for ln in current.splitlines() if HOSTS_MARKER not in ln]
+    return "\n".join(lines) + "\n"
+
+
+def plist_contents(script_path: Path, links_path: Path) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{PLIST_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{sys.executable}</string>
+    <string>{script_path}</string>
+    <string>--links</string><string>{links_path}</string>
+    <string>serve</string>
+    <string>--host</string><string>127.0.0.1</string>
+    <string>--port</string><string>80</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/golink.err.log</string>
+  <key>StandardOutPath</key><string>/tmp/golink.out.log</string>
+</dict></plist>
+"""
+
+
+def _real_links_path(args):
+    """Resolve the links path for the *invoking* user, even under sudo.
+
+    When `install` runs via sudo and --links was left at the default (which
+    points at root's home), redirect it to the real user's ~/.golinks.
+    """
+    if args.links != LINKS_PATH:
+        return args.links  # user gave an explicit path; respect it
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        home = Path(pwd.getpwnam(sudo_user).pw_dir)
+        return home / ".golinks" / "links.json"
+    return args.links
+
+
+def cmd_install(args):
+    script_path = Path(__file__).resolve()
+    links_path = _real_links_path(args)
+    # 1. hosts entry
+    HOSTS_PATH.write_text(hosts_with_entry(HOSTS_PATH.read_text()))
+    # 2. plist
+    PLIST_PATH.write_text(plist_contents(script_path, links_path))
+    subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True)
+    subprocess.run(["launchctl", "load", str(PLIST_PATH)], check=True)
+    print(f"installed. resolver reads {links_path}")
+    print("go links are live — try go/<name> in a browser.")
+    return 0
+
+
+def cmd_uninstall(args):
+    subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True)
+    if PLIST_PATH.exists():
+        PLIST_PATH.unlink()
+    if HOSTS_PATH.exists():
+        HOSTS_PATH.write_text(hosts_without_entry(HOSTS_PATH.read_text()))
+    print("uninstalled. links.json left intact.")
+    return 0
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
