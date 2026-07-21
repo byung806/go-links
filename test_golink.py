@@ -179,3 +179,83 @@ def test_plist_contains_label_and_paths():
     assert "com.bryan.golink" in xml
     assert "/Users/byung/golink/golink" in xml
     assert "serve" in xml
+
+
+# --- usage counts ---
+
+def test_counts_missing_returns_empty(tmp_path):
+    assert golink.load_counts(tmp_path / "stats.json") == {}
+
+
+def test_bump_count_increments(tmp_path):
+    lp = tmp_path / "links.json"
+    golink.bump_count(lp, "mail")
+    golink.bump_count(lp, "mail")
+    golink.bump_count(lp, "gh")
+    counts = golink.load_counts(golink.counts_path_for(lp))
+    assert counts == {"mail": 2, "gh": 1}
+
+
+def test_counts_path_is_beside_links(tmp_path):
+    lp = tmp_path / "sub" / "links.json"
+    assert golink.counts_path_for(lp) == tmp_path / "sub" / "stats.json"
+
+
+def test_get_redirect_records_hit(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        for _ in range(3):
+            conn.request("GET", "/mail")
+            conn.getresponse().read()
+        counts = golink.load_counts(golink.counts_path_for(links_path))
+        assert counts.get("mail") == 3
+    finally:
+        httpd.shutdown()
+
+
+def test_get_passthrough_records_first_segment(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    golink.save_links(links_path, {"gh": "https://github.com"})
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/gh/some/repo")
+        conn.getresponse().read()
+        counts = golink.load_counts(golink.counts_path_for(links_path))
+        assert counts.get("gh") == 1
+    finally:
+        httpd.shutdown()
+
+
+def test_get_404_does_not_record(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/nope")
+        conn.getresponse().read()
+        conn.request("GET", "/")
+        conn.getresponse().read()
+        counts = golink.load_counts(golink.counts_path_for(links_path))
+        assert counts == {}
+    finally:
+        httpd.shutdown()
+
+
+def test_cli_list_shows_count(tmp_path, capsys):
+    lp = tmp_path / "links.json"
+    golink.save_links(lp, {"mail": "https://mail.google.com"})
+    golink.bump_count(lp, "mail")
+    golink.bump_count(lp, "mail")
+    golink.main(["--links", str(lp), "list"])
+    out = capsys.readouterr().out
+    assert "mail" in out
+    assert "2" in out
+
+
+def test_cli_rm_prunes_count(tmp_path):
+    lp = tmp_path / "links.json"
+    golink.save_links(lp, {"mail": "https://m.com"})
+    golink.bump_count(lp, "mail")
+    golink.main(["--links", str(lp), "rm", "mail"])
+    counts = golink.load_counts(golink.counts_path_for(lp))
+    assert "mail" not in counts

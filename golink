@@ -44,6 +44,28 @@ def resolve(links: dict, path: str):
     return target
 
 
+def link_name(path: str):
+    """First path segment of a request (the go-link name), or None."""
+    segments = [s for s in urlsplit(path).path.split("/") if s != ""]
+    return segments[0] if segments else None
+
+
+def counts_path_for(links_path) -> Path:
+    """Usage-count file, kept beside the links store."""
+    return Path(links_path).with_name("stats.json")
+
+
+def load_counts(path) -> dict:
+    return load_links(path)  # same JSON-dict format; {} if missing
+
+
+def bump_count(links_path, name: str) -> None:
+    cpath = counts_path_for(links_path)
+    counts = load_counts(cpath)
+    counts[name] = counts.get(name, 0) + 1
+    save_links(cpath, counts)
+
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
 import html
@@ -58,7 +80,7 @@ PAGE = """<!doctype html>
  form.inline{{display:inline}} button{{font:inherit;padding:6px 10px;cursor:pointer}}
 </style></head><body>
 <h1>go links</h1>
-<table><tr><th>name</th><th>target</th><th></th></tr>{rows}</table>
+<table><tr><th>name</th><th>used</th><th>target</th><th></th></tr>{rows}</table>
 <h2>add / update</h2>
 <form method="post" action="/">
  <input name="name" placeholder="name" required>
@@ -68,16 +90,17 @@ PAGE = """<!doctype html>
 </body></html>"""
 
 
-def _render(links: dict) -> bytes:
+def _render(links: dict, counts: dict) -> bytes:
     rows = ""
-    for name in sorted(links):
+    for name in sorted(links, key=lambda n: (-counts.get(n, 0), n)):
         url = links[name]
         rows += (
-            "<tr><td><code>go/{n}</code></td><td><a href='{u}'>{u}</a></td>"
+            "<tr><td><code>go/{n}</code></td><td>{c}</td>"
+            "<td><a href='{u}'>{u}</a></td>"
             "<td><form class='inline' method='post' action='/delete'>"
             "<input type='hidden' name='name' value='{n}'>"
             "<button type='submit'>delete</button></form></td></tr>"
-        ).format(n=html.escape(name), u=html.escape(url))
+        ).format(n=html.escape(name), c=counts.get(name, 0), u=html.escape(url))
     return PAGE.format(rows=rows).encode()
 
 
@@ -94,7 +117,8 @@ def make_handler(links_path):
         def do_GET(self):
             links = load_links(links_path)
             if self.path == "/" or self.path.startswith("/?"):
-                body = _render(links)
+                counts = load_counts(counts_path_for(links_path))
+                body = _render(links, counts)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -110,6 +134,7 @@ def make_handler(links_path):
                 self.end_headers()
                 self.wfile.write(msg)
                 return
+            bump_count(links_path, link_name(self.path))
             self._redirect(target, 302)
 
         def _read_form(self):
@@ -158,6 +183,10 @@ def cmd_rm(args):
         print(f"no such link: {args.name}", file=sys.stderr)
         return 1
     save_links(args.links, links)
+    cpath = counts_path_for(args.links)
+    counts = load_counts(cpath)
+    if counts.pop(args.name, None) is not None:
+        save_links(cpath, counts)
     print(f"removed {args.name}")
     return 0
 
@@ -167,9 +196,11 @@ def cmd_list(args):
     if not links:
         print("(no links)")
         return 0
+    counts = load_counts(counts_path_for(args.links))
     width = max(len(n) for n in links)
-    for name in sorted(links):
-        print(f"{name.ljust(width)}  {links[name]}")
+    for name in sorted(links, key=lambda n: (-counts.get(n, 0), n)):
+        hits = str(counts.get(name, 0)).rjust(5)
+        print(f"{name.ljust(width)} {hits}  {links[name]}")
     return 0
 
 
