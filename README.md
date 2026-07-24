@@ -13,42 +13,22 @@ Clone it somewhere it can stay (the daemon points at this path):
     cd ~/golink
     chmod +x golink
 
-Add a couple links:
-
-    ./golink add mail https://mail.google.com
-    ./golink add gh https://github.com/byung806
-
 Install the resolver. This writes the `/etc/hosts` entry and a launchd daemon
 on port 80, so it needs sudo:
 
     sudo ./golink install
 
-Done. Open `http://go/mail` in a browser.
-
 ## usage
 
-    ./golink add <name> <url>    add or update a link
-    ./golink rm <name>           remove a link
-    ./golink list                list everything
+Manage and open links two ways:
 
-Or manage links in the browser at `http://go/`.
+- In the browser at `http://go/` — keep the `http://` scheme so Chrome navigates
+  instead of running a search.
+- From the CLI:
 
-Paths pass through: with `gh -> https://github.com`, going to `go/gh/byung806`
-sends you to `https://github.com/byung806`.
-
-## chrome
-
-Typing a bare `go/mail` in Chrome's address bar sometimes searches instead of
-navigating (single-word hostname). Two fixes:
-
-- type it with the scheme: `http://go/mail`
-- or add a site search in Settings > Search engines: shortcut `go`, URL `http://go/%s`
-
-## run from anywhere (optional)
-
-    sudo ln -s ~/golink/golink /usr/local/bin/golink
-
-Then `golink add ...` works from any directory.
+      ./golink add <name> <url>
+      ./golink rm <name>
+      ./golink list
 
 ## uninstall
 
