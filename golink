@@ -71,37 +71,127 @@ from urllib.parse import parse_qs
 import html
 
 
-PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>go links</title>
+# Design language borrowed from bryan-yung.com: warm paper, Libre Baskerville
+# serif display, his green accent. The faint bar behind each row is sized to
+# that link's share of total hits — the usage data is the page's subject.
+PAGE_HEAD = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>go links</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&display=swap" rel="stylesheet">
 <style>
- body{{font:15px/1.5 -apple-system,system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px}}
- table{{border-collapse:collapse;width:100%}} td,th{{text-align:left;padding:6px 8px;border-bottom:1px solid #eee}}
- code{{background:#f4f4f4;padding:1px 5px;border-radius:4px}} input{{padding:6px;font:inherit}}
- form.inline{{display:inline}} button{{font:inherit;padding:6px 10px;cursor:pointer}}
-</style></head><body>
-<h1>go links</h1>
-<table><tr><th>name</th><th>used</th><th>target</th><th></th></tr>{rows}</table>
-<h2>add / update</h2>
-<form method="post" action="/">
- <input name="name" placeholder="name" required>
- <input name="url" placeholder="https://..." size="30" required>
- <button type="submit">save</button>
+ :root{
+  --paper:#fdfbf4; --ink:#1c1c1e; --muted:#8a8a8f; --faint:#b4afa2;
+  --line:#ece7db; --green:#6ea62c; --green-bg:rgba(129,204,62,.16);
+  --sans:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
+  --serif:"Libre Baskerville",Georgia,"Times New Roman",serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+ }
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+  font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+ .wrap{max-width:660px;margin:0 auto;padding:64px 24px 96px}
+ .eyebrow{font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--faint);font-weight:600;margin:0 0 14px}
+ h1{font-family:var(--serif);font-weight:700;font-size:40px;line-height:1;
+  letter-spacing:-.01em;margin:0}
+ h1 .slash{color:var(--green)}
+ .sub{color:var(--muted);margin:12px 0 40px;font-size:14px}
+ .sub b{color:var(--ink);font-weight:600}
+ ul.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+ li.row{position:relative;display:flex;align-items:baseline;gap:16px;
+  padding:13px 12px;border-bottom:1px solid var(--line)}
+ li.row .bar{position:absolute;inset:0;border-radius:7px;z-index:0;
+  background:linear-gradient(90deg,var(--green-bg),rgba(129,204,62,.03));
+  transition:opacity .2s}
+ li.row>*{position:relative;z-index:1}
+ a.name{font-family:var(--mono);font-size:14px;text-decoration:none;
+  color:var(--ink);white-space:nowrap;font-weight:500}
+ a.name .go{color:var(--faint)}
+ a.name:hover{color:var(--green)}
+ .target{flex:1;min-width:0;color:var(--muted);font-size:13px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+ .hits{font-variant-numeric:tabular-nums;font-size:13px;color:var(--faint);
+  min-width:2.2em;text-align:right}
+ .hits.zero{opacity:.45}
+ .del{margin:0}
+ .del button{border:0;background:none;color:var(--faint);cursor:pointer;
+  font-size:18px;line-height:1;padding:0 2px;opacity:0;transition:opacity .15s,color .15s}
+ li.row:hover .del button{opacity:1}
+ .del button:hover{color:#c0392b}
+ .empty{color:var(--muted);padding:28px 0;border-bottom:1px solid var(--line)}
+ form.add{display:flex;gap:8px;margin-top:32px;flex-wrap:wrap}
+ form.add .name-in{flex:0 0 130px}
+ form.add .url-in{flex:1 1 220px}
+ form.add input{font:inherit;padding:9px 11px;border:1px solid var(--line);
+  border-radius:8px;background:#fff;color:var(--ink)}
+ form.add input::placeholder{color:var(--faint)}
+ form.add button{font:inherit;font-weight:600;padding:9px 18px;border:0;
+  border-radius:8px;background:var(--ink);color:var(--paper);cursor:pointer}
+ form.add button:hover{background:var(--green)}
+ :focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:4px}
+ @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+ @media (max-width:480px){
+  .wrap{padding:44px 18px 72px} h1{font-size:32px}
+  .target{flex-basis:100%;text-align:left;order:3}
+  li.row{flex-wrap:wrap}
+ }
+</style></head><body><div class="wrap">
+<p class="eyebrow">Local shortcuts</p>
+<h1><span class="slash">go/</span>links</h1>
+"""
+
+PAGE_FOOT = """<form class="add" method="post" action="/">
+ <input class="name-in" name="name" placeholder="name" required autocomplete="off">
+ <input class="url-in" name="url" type="url" placeholder="https://..." required autocomplete="off">
+ <button type="submit">Add link</button>
 </form>
-</body></html>"""
+</div></body></html>"""
+
+
+def _display_url(url: str) -> str:
+    """Trim scheme and trailing slash so targets read cleanly in the list."""
+    for scheme in ("https://", "http://"):
+        if url.startswith(scheme):
+            url = url[len(scheme):]
+            break
+    return url.rstrip("/")
 
 
 def _render(links: dict, counts: dict) -> bytes:
+    n = len(links)
+    total = sum(counts.values())
+    sub = (
+        f'<p class="sub"><b>{n}</b> shortcut{"" if n == 1 else "s"} '
+        f'&middot; <b>{total}</b> total hit{"" if total == 1 else "s"}</p>'
+    )
+    if not links:
+        middle = sub + '<p class="empty">No shortcuts yet. Add one below.</p>'
+        return (PAGE_HEAD + middle + PAGE_FOOT).encode()
+
+    peak = max(counts.values(), default=0) or 1
     rows = ""
-    for name in sorted(links, key=lambda n: (-counts.get(n, 0), n)):
-        url = links[name]
+    for name in sorted(links, key=lambda k: (-counts.get(k, 0), k)):
+        c = counts.get(name, 0)
+        pct = round(c / peak * 100)
+        n_esc = html.escape(name)
         rows += (
-            "<tr><td><code>go/{n}</code></td><td>{c}</td>"
-            "<td><a href='{u}'>{u}</a></td>"
-            "<td><form class='inline' method='post' action='/delete'>"
-            "<input type='hidden' name='name' value='{n}'>"
-            "<button type='submit'>delete</button></form></td></tr>"
-        ).format(n=html.escape(name), c=counts.get(name, 0), u=html.escape(url))
-    return PAGE.format(rows=rows).encode()
+            '<li class="row">'
+            f'<div class="bar" style="width:{pct}%"></div>'
+            f'<a class="name" href="{html.escape(links[name])}">'
+            f'<span class="go">go/</span>{n_esc}</a>'
+            f'<span class="target">{html.escape(_display_url(links[name]))}</span>'
+            f'<span class="hits{" zero" if c == 0 else ""}">{c}</span>'
+            '<form class="del" method="post" action="/delete">'
+            f'<input type="hidden" name="name" value="{n_esc}">'
+            f'<button type="submit" aria-label="Delete go/{n_esc}">&times;</button>'
+            '</form></li>'
+        )
+    middle = sub + f'<ul class="rows">{rows}</ul>'
+    return (PAGE_HEAD + middle + PAGE_FOOT).encode()
 
 
 def make_handler(links_path):
