@@ -134,7 +134,7 @@ PAGE_HEAD = """<!doctype html>
  li.row:hover .del button{opacity:1}
  .del button:hover{color:#c0392b}
  .empty{color:var(--muted);padding:26px 2px;border-bottom:1px solid var(--line)}
- form.add{display:flex;gap:8px;margin-top:30px;flex-wrap:wrap}
+ form.add{display:flex;gap:8px;margin:0 0 18px;flex-wrap:wrap}
  .name-field{display:flex;align-items:center;flex:0 0 160px;padding-left:11px;
   border:1px solid var(--line);border-radius:8px;background:#fff;
   transition:border-color .15s,box-shadow .15s}
@@ -161,19 +161,19 @@ PAGE_HEAD = """<!doctype html>
  }
 </style></head><body><div class="wrap">
 <h1><a href="/"><span class="slash">go/</span>links</a></h1>
-<div class="search-wrap">
- <input id="search" type="text" placeholder="Search shortcuts…" autocomplete="off" autofocus aria-label="Search shortcuts">
- <kbd>/</kbd>
-</div>
-"""
-
-PAGE_FOOT = """<form class="add" method="post" action="/">
+<form class="add" method="post" action="/">
  <div class="name-field"><span class="go">go/</span>
   <input name="name" placeholder="name" required autocomplete="off" spellcheck="false"></div>
  <input class="url-in" name="url" type="url" placeholder="https://…" required autocomplete="off">
  <button type="submit">Add link</button>
 </form>
+<div class="search-wrap">
+ <input id="search" type="text" placeholder="Search shortcuts…" autocomplete="off" aria-label="Search shortcuts">
+ <kbd>/</kbd>
 </div>
+"""
+
+PAGE_FOOT = """</div>
 <script>
 (function(){
  var s=document.getElementById('search');
