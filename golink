@@ -98,10 +98,6 @@ PAGE_HEAD = """<!doctype html>
   letter-spacing:-.01em;margin:0 0 22px}
  h1 a{color:inherit;text-decoration:none}
  h1 .slash{color:var(--green)}
- h1 .caret{display:inline-block;width:3px;height:.8em;margin-left:7px;
-  background:var(--green);vertical-align:baseline;opacity:.9;
-  animation:blink 1.15s step-end infinite}
- @keyframes blink{50%{opacity:0}}
  .search-wrap{position:relative;margin:0 0 10px}
  #search{width:100%;font:inherit;padding:12px 14px 12px 42px;color:var(--ink);
   border:1px solid var(--line);border-radius:11px;
@@ -120,15 +116,9 @@ PAGE_HEAD = """<!doctype html>
  ul.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line);
   animation:fadein .5s both}
  @keyframes fadein{from{opacity:0}to{opacity:1}}
- li.row{position:relative;display:flex;align-items:baseline;gap:16px;
+ li.row{display:flex;align-items:baseline;gap:16px;
   padding:13px 12px;border-bottom:1px solid var(--line);transition:background .15s}
  li.row:hover{background:rgba(0,0,0,.015)}
- li.row .bar{position:absolute;inset:0;border-radius:7px;z-index:0;width:var(--pct);
-  background:linear-gradient(90deg,var(--green-bg),rgba(129,204,62,.03));
-  animation:grow .8s cubic-bezier(.22,1,.36,1) both;transition:filter .2s}
- @keyframes grow{from{width:0}to{width:var(--pct)}}
- li.row:hover .bar{filter:saturate(1.5)}
- li.row>*{position:relative;z-index:1}
  a.name{font-family:var(--mono);font-size:14px;text-decoration:none;
   color:var(--ink);white-space:nowrap;font-weight:500}
  a.name .go{color:var(--faint)}
@@ -163,7 +153,6 @@ PAGE_HEAD = """<!doctype html>
  :focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:4px}
  @media (prefers-reduced-motion:reduce){
   *{transition:none!important;animation:none!important}
-  li.row .bar{width:var(--pct)}
  }
  @media (max-width:480px){
   .wrap{padding:44px 18px 72px} h1{font-size:32px}
@@ -171,7 +160,7 @@ PAGE_HEAD = """<!doctype html>
   li.row{flex-wrap:wrap} .name-field{flex-basis:100%}
  }
 </style></head><body><div class="wrap">
-<h1><a href="/"><span class="slash">go/</span>links</a><span class="caret" aria-hidden="true"></span></h1>
+<h1><a href="/"><span class="slash">go/</span>links</a></h1>
 <div class="search-wrap">
  <input id="search" type="text" placeholder="Search shortcuts…" autocomplete="off" autofocus aria-label="Search shortcuts">
  <kbd>/</kbd>
@@ -234,17 +223,14 @@ def _render(links: dict, counts: dict) -> bytes:
         middle = sub + '<p class="empty">No shortcuts yet. Add one below.</p>'
         return (PAGE_HEAD + middle + PAGE_FOOT).encode()
 
-    peak = max(counts.values(), default=0) or 1
     rows = ""
-    for i, name in enumerate(sorted(links, key=lambda k: (-counts.get(k, 0), k))):
+    for name in sorted(links):
         c = counts.get(name, 0)
-        pct = round(c / peak * 100)
         n_esc = html.escape(name)
         disp = _display_url(links[name])
         search = html.escape((name + " " + disp).lower(), quote=True)
         rows += (
             f'<li class="row" data-name="{n_esc}" data-search="{search}">'
-            f'<div class="bar" style="--pct:{pct}%;animation-delay:{i * 35}ms"></div>'
             f'<a class="name" href="{html.escape(links[name])}">'
             f'<span class="go">go/</span>{n_esc}</a>'
             f'<span class="target">{html.escape(disp)}</span>'
@@ -353,7 +339,7 @@ def cmd_list(args):
         return 0
     counts = load_counts(counts_path_for(args.links))
     width = max(len(n) for n in links)
-    for name in sorted(links, key=lambda n: (-counts.get(n, 0), n)):
+    for name in sorted(links):
         hits = str(counts.get(name, 0)).rjust(5)
         print(f"{name.ljust(width)} {hits}  {links[name]}")
     return 0
