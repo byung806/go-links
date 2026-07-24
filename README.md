@@ -22,8 +22,8 @@ on port 80, so it needs sudo:
 
 Manage and open links two ways:
 
-- In the browser at `http://go/` — keep the `http://` scheme so the browser
-  navigates instead of running a search.
+- In the browser at `http://go/` or `go/` — ensure the browser navigates
+  instead of searching.
 - From the CLI:
 
       ./golink add <name> <url>
