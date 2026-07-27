@@ -205,7 +205,10 @@ PAGE_FOOT = """</div>
   }else if(e.key==='Escape'){s.value='';apply();}
  });
  document.addEventListener('keydown',function(e){
-  if(e.key==='/'&&document.activeElement!==s){e.preventDefault();s.focus();}
+  if(e.key!=='/')return;
+  var el=document.activeElement,tag=el&&el.tagName;
+  if(tag==='INPUT'||tag==='TEXTAREA'||(el&&el.isContentEditable))return;
+  e.preventDefault();s.focus();
  });
 })();
 </script>
