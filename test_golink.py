@@ -58,6 +58,69 @@ def test_resolve_trailing_slash_on_target_not_doubled():
     assert golink.resolve(links, "/gh/foo") == "https://github.com/foo"
 
 
+# --- sub-commands (multi-segment keys) with dynamic passthrough fallback ---
+
+def test_resolve_specific_subcommand_beats_base():
+    links = {"doc": "https://d.com", "doc/quant": "https://q.com/quant"}
+    assert golink.resolve(links, "/doc/quant") == "https://q.com/quant"
+
+
+def test_resolve_base_passthrough_when_no_specific_sub():
+    links = {"doc": "https://d.com", "doc/quant": "https://q.com/quant"}
+    assert golink.resolve(links, "/doc/courses") == "https://d.com/courses"
+
+
+def test_resolve_base_alone():
+    links = {"doc": "https://d.com", "doc/quant": "https://q.com"}
+    assert golink.resolve(links, "/doc") == "https://d.com"
+
+
+def test_resolve_subcommand_further_passthrough():
+    links = {"doc/quant": "https://q.com"}
+    assert golink.resolve(links, "/doc/quant/2027") == "https://q.com/2027"
+
+
+def test_resolve_subcommand_without_base_404s_on_base():
+    links = {"doc/quant": "https://q.com"}
+    assert golink.resolve(links, "/doc") is None
+
+
+def test_resolve_subcommand_query_passthrough():
+    links = {"doc/quant": "https://q.com"}
+    assert golink.resolve(links, "/doc/quant?x=1") == "https://q.com?x=1"
+
+
+def test_matched_key_prefers_specific():
+    links = {"doc": "https://d.com", "doc/quant": "https://q.com",
+             "gh": "https://github.com"}
+    assert golink.matched_key(links, "/doc/quant") == "doc/quant"
+    assert golink.matched_key(links, "/doc/courses") == "doc"
+    assert golink.matched_key(links, "/gh/byung806") == "gh"
+    assert golink.matched_key(links, "/nope") is None
+
+
+def test_count_uses_matched_subcommand_key(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    golink.save_links(links_path, {"doc": "https://d.com", "doc/quant": "https://q.com"})
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/doc/quant")
+        conn.getresponse().read()
+        conn.request("GET", "/doc/courses")
+        conn.getresponse().read()
+        counts = golink.load_counts(golink.counts_path_for(links_path))
+        assert counts.get("doc/quant") == 1
+        assert counts.get("doc") == 1
+    finally:
+        httpd.shutdown()
+
+
+def test_cli_add_subcommand(tmp_path):
+    lp = tmp_path / "links.json"
+    golink.main(["--links", str(lp), "add", "doc/quant", "https://q.com"])
+    assert golink.load_links(lp)["doc/quant"] == "https://q.com"
+
+
 import threading
 import http.client
 from http.server import HTTPServer

@@ -27,27 +27,38 @@ def save_links(path: Path, links: dict) -> None:
     os.replace(tmp, path)
 
 
+def _match_key(links: dict, path: str):
+    """Longest link name (which may contain '/') that prefixes the request.
+
+    Returns (key, leftover_segments) or (None, None). This lets a link define
+    specific sub-commands (go/doc/quant) while any link without a matching sub
+    still passes arbitrary trailing segments through to its base (go/gh/<x>).
+    The most specific — longest — matching key wins.
+    """
+    segments = [s for s in urlsplit(path).path.split("/") if s != ""]
+    for i in range(len(segments), 0, -1):
+        key = "/".join(segments[:i])
+        if key in links:
+            return key, segments[i:]
+    return None, None
+
+
 def resolve(links: dict, path: str):
-    split = urlsplit(path)
-    segments = [s for s in split.path.split("/") if s != ""]
-    if not segments:
+    key, rest = _match_key(links, path)
+    if key is None:
         return None
-    name = segments[0]
-    if name not in links:
-        return None
-    target = links[name].rstrip("/")
-    rest = segments[1:]
+    target = links[key].rstrip("/")
     if rest:
         target = target + "/" + "/".join(rest)
-    if split.query:
-        target = target + "?" + split.query
+    query = urlsplit(path).query
+    if query:
+        target = target + "?" + query
     return target
 
 
-def link_name(path: str):
-    """First path segment of a request (the go-link name), or None."""
-    segments = [s for s in urlsplit(path).path.split("/") if s != ""]
-    return segments[0] if segments else None
+def matched_key(links: dict, path: str):
+    """The link name a request resolves to (used for usage counting), or None."""
+    return _match_key(links, path)[0]
 
 
 def counts_path_for(links_path) -> Path:
@@ -223,9 +234,10 @@ def _render(links: dict, counts: dict) -> bytes:
         n_esc = html.escape(name)
         disp = _display_url(links[name])
         search = html.escape((name + " " + disp).lower(), quote=True)
+        indent = name.count("/") * 16
         rows += (
             f'<li class="row" data-name="{n_esc}" data-search="{search}">'
-            f'<a class="name" href="{html.escape(links[name])}">'
+            f'<a class="name" href="{html.escape(links[name])}" style="margin-left:{indent}px">'
             f'<span class="go">go/</span>{n_esc}</a>'
             f'<span class="target">{html.escape(disp)}</span>'
             f'<span class="hits{" zero" if c == 0 else ""}">{c}</span>'
@@ -269,7 +281,7 @@ def make_handler(links_path):
                 self.end_headers()
                 self.wfile.write(msg)
                 return
-            bump_count(links_path, link_name(self.path))
+            bump_count(links_path, matched_key(links, self.path))
             self._redirect(target, 302)
 
         def _read_form(self):
@@ -305,10 +317,11 @@ import sys
 
 
 def cmd_add(args):
+    name = args.name.strip("/")
     links = load_links(args.links)
-    links[args.name] = args.url
+    links[name] = args.url
     save_links(args.links, links)
-    print(f"added {args.name} -> {args.url}")
+    print(f"added {name} -> {args.url}")
     return 0
 
 
