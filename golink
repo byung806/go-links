@@ -134,10 +134,14 @@ PAGE_HEAD = """<!doctype html>
  .hits{font-variant-numeric:tabular-nums;font-size:13px;color:var(--faint);
   min-width:2.2em;text-align:right}
  .hits.zero{opacity:.4}
+ .copy{border:0;background:none;color:var(--faint);cursor:pointer;padding:0 2px;
+  display:inline-flex;align-items:center;opacity:0;transition:opacity .15s,color .15s}
+ li.row:hover .copy,li.row:focus-within .copy{opacity:1}
+ .copy:hover,.copy.copied{color:var(--green)}
  .del{margin:0}
  .del button{border:0;background:none;color:var(--faint);cursor:pointer;
   font-size:18px;line-height:1;padding:0 2px;opacity:0;transition:opacity .15s,color .15s}
- li.row:hover .del button{opacity:1}
+ li.row:hover .del button,li.row:focus-within .del button{opacity:1}
  .del button:hover{color:#c0392b}
  .empty{color:var(--muted);padding:26px 2px;border-bottom:1px solid var(--line)}
  form.add{display:flex;gap:8px;margin:0 0 18px;flex-wrap:wrap}
@@ -210,9 +214,36 @@ PAGE_FOOT = """</div>
   if(tag==='INPUT'||tag==='TEXTAREA'||(el&&el.isContentEditable))return;
   e.preventDefault();s.focus();
  });
+ var CHECK='<svg width="14" height="14" viewBox="0 0 24 24" fill="none"'
+  +' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+  +' stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+ function copyText(t){
+  if(navigator.clipboard&&navigator.clipboard.writeText)return navigator.clipboard.writeText(t);
+  var ta=document.createElement('textarea');
+  ta.value=t;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.focus();ta.select();
+  try{document.execCommand('copy');}catch(err){}
+  document.body.removeChild(ta);
+  return Promise.resolve();
+ }
+ document.addEventListener('click',function(e){
+  var btn=e.target.closest&&e.target.closest('.copy');
+  if(!btn)return;
+  e.preventDefault();
+  copyText(btn.getAttribute('data-copy'));
+  var orig=btn.innerHTML;
+  btn.innerHTML=CHECK;btn.classList.add('copied');
+  setTimeout(function(){btn.innerHTML=orig;btn.classList.remove('copied');},1200);
+ });
 })();
 </script>
 </body></html>"""
+
+
+COPY_SVG = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
+            'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+            'stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/>'
+            '<path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>')
 
 
 def _display_url(url: str) -> str:
@@ -244,6 +275,8 @@ def _render(links: dict, counts: dict) -> bytes:
             f'<span class="go">go/</span>{n_esc}</a>'
             f'<span class="target">{html.escape(disp)}</span>'
             f'<span class="hits{" zero" if c == 0 else ""}">{c}</span>'
+            f'<button class="copy" type="button" data-copy="go/{n_esc}" '
+            f'aria-label="Copy go/{n_esc}" title="Copy">{COPY_SVG}</button>'
             '<form class="del" method="post" action="/delete">'
             f'<input type="hidden" name="name" value="{n_esc}">'
             f'<button type="submit" aria-label="Delete go/{n_esc}">&times;</button>'
