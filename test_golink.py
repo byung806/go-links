@@ -322,3 +322,333 @@ def test_cli_rm_prunes_count(tmp_path):
     golink.main(["--links", str(lp), "rm", "mail"])
     counts = golink.load_counts(golink.counts_path_for(lp))
     assert "mail" not in counts
+
+
+# --- aliases ---------------------------------------------------------
+
+ALIASED = {
+    "76-270": "https://canvas.cmu.edu/270",
+    "76-270/markel": "https://markel.example.com",
+    "76270": "go/76-270",
+}
+
+
+def test_alias_resolves_like_canonical():
+    assert golink.resolve(ALIASED, "/76270") == "https://canvas.cmu.edu/270"
+
+
+def test_alias_sub_link_matches_canonical_sub_link():
+    assert golink.resolve(ALIASED, "/76270/markel") == "https://markel.example.com"
+
+
+def test_alias_passthrough_when_no_specific_sub():
+    assert golink.resolve(ALIASED, "/76270/hw1") == "https://canvas.cmu.edu/270/hw1"
+
+
+def test_alias_query_passthrough():
+    assert golink.resolve(ALIASED, "/76270?x=1") == "https://canvas.cmu.edu/270?x=1"
+
+
+def test_alias_chain_resolves():
+    links = {"a": "https://a.com", "b": "go/a", "c": "go/b"}
+    assert golink.resolve(links, "/c/x") == "https://a.com/x"
+
+
+def test_alias_cycle_returns_none():
+    links = {"a": "go/b", "b": "go/a"}
+    assert golink.resolve(links, "/a") is None
+
+
+def test_dangling_alias_404s():
+    assert golink.resolve({"b": "go/gone"}, "/b") is None
+
+
+def test_alias_hit_credited_to_canonical():
+    assert golink.matched_key(ALIASED, "/76270/hw1") == "76-270"
+    assert golink.matched_key(ALIASED, "/76270/markel") == "76-270/markel"
+
+
+def test_aliases_for_lists_chain():
+    links = {"a": "https://a.com", "b": "go/a", "c": "go/b"}
+    assert golink.aliases_for(links, "a") == ["b", "c"]
+
+
+def test_cli_alias(tmp_path):
+    p = tmp_path / "links.json"
+    golink.main(["--links", str(p), "add", "76-270", "https://canvas.cmu.edu/270"])
+    assert golink.main(["--links", str(p), "alias", "76270", "76-270"]) == 0
+    assert golink.load_links(p)["76270"] == "go/76-270"
+
+
+def test_cli_alias_missing_target_fails(tmp_path):
+    p = tmp_path / "links.json"
+    assert golink.main(["--links", str(p), "alias", "x", "nope"]) == 1
+    assert golink.load_links(p) == {}
+
+
+def test_cli_add_go_prefix_makes_alias(tmp_path):
+    p = tmp_path / "links.json"
+    golink.main(["--links", str(p), "add", "a", "https://a.com"])
+    golink.main(["--links", str(p), "add", "b", "go/a"])
+    assert golink.load_links(p)["b"] == "go/a"
+
+
+def test_cli_list_shows_alias(tmp_path, capsys):
+    p = tmp_path / "links.json"
+    golink.save_links(p, ALIASED)
+    golink.main(["--links", str(p), "list"])
+    out = capsys.readouterr().out
+    assert "aka go/76270" in out
+    # the alias does not get its own target row
+    assert "76270 " not in out.replace("aka go/76270", "")
+
+
+def test_post_add_alias(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("POST", "/", "name=m&url=go%2Fmail",
+                     {"Content-Type": "application/x-www-form-urlencoded"})
+        conn.getresponse().read()
+        assert golink.load_links(links_path)["m"] == "go/mail"
+    finally:
+        httpd.shutdown()
+
+
+def test_get_alias_redirects_and_credits_canonical(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    try:
+        golink.save_links(links_path,
+                          {"mail": "https://mail.google.com", "m": "go/mail"})
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/m/inbox")
+        resp = conn.getresponse()
+        resp.read()
+        assert resp.status == 302
+        assert resp.getheader("Location") == "https://mail.google.com/inbox"
+        counts = golink.load_counts(golink.counts_path_for(links_path))
+        assert counts == {"mail": 1}
+    finally:
+        httpd.shutdown()
+
+
+def test_render_shows_alias_under_canonical():
+    body = golink._render(ALIASED, {}).decode()
+    assert 'class="aka"' in body
+    assert "go/76270" in body
+    # 2 real links + no standalone row for the alias
+    assert body.count('class="row"') == 2
+
+
+def test_serve_is_threaded_and_survives_idle_socket(tmp_path):
+    """A socket opened without a request must not block later requests."""
+    import socket
+    links_path = tmp_path / "links.json"
+    golink.save_links(links_path, {"mail": "https://mail.google.com"})
+    httpd = golink.ThreadingHTTPServer(("127.0.0.1", 0), golink.make_handler(links_path))
+    httpd.daemon_threads = True
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    idle = socket.create_connection(("127.0.0.1", port))  # never sends anything
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/mail")
+        assert conn.getresponse().status == 302
+    finally:
+        idle.close()
+        httpd.shutdown()
+
+
+# --- adding a duplicate target folds into an alias --------------------
+
+def test_add_same_url_becomes_alias(tmp_path):
+    p = tmp_path / "links.json"
+    golink.main(["--links", str(p), "add", "76-270", "https://canvas.cmu.edu/270"])
+    golink.main(["--links", str(p), "add", "76270", "https://canvas.cmu.edu/270"])
+    links = golink.load_links(p)
+    assert links["76270"] == "go/76-270"
+    assert golink.resolve(links, "/76270/hw1") == "https://canvas.cmu.edu/270/hw1"
+
+
+def test_add_same_url_ignores_trailing_slash(tmp_path):
+    p = tmp_path / "links.json"
+    golink.main(["--links", str(p), "add", "a", "https://a.com"])
+    golink.main(["--links", str(p), "add", "b", "https://a.com/"])
+    assert golink.load_links(p)["b"] == "go/a"
+
+
+def test_add_shortest_existing_name_wins_as_canonical(tmp_path):
+    p = tmp_path / "links.json"
+    golink.save_links(p, {"long-name": "https://a.com", "a": "https://a.com"})
+    golink.main(["--links", str(p), "add", "c", "https://a.com"])
+    assert golink.load_links(p)["c"] == "go/a"
+
+
+def test_readding_same_name_and_url_is_not_a_self_alias(tmp_path):
+    p = tmp_path / "links.json"
+    golink.main(["--links", str(p), "add", "a", "https://a.com"])
+    golink.main(["--links", str(p), "add", "a", "https://a.com"])
+    assert golink.load_links(p)["a"] == "https://a.com"
+
+
+def test_add_different_url_stays_its_own_link(tmp_path):
+    p = tmp_path / "links.json"
+    golink.main(["--links", str(p), "add", "a", "https://a.com"])
+    golink.main(["--links", str(p), "add", "b", "https://b.com"])
+    assert golink.load_links(p)["b"] == "https://b.com"
+
+
+def test_post_same_url_becomes_alias(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("POST", "/", "name=m&url=https%3A%2F%2Fmail.google.com",
+                     {"Content-Type": "application/x-www-form-urlencoded"})
+        conn.getresponse().read()
+        assert golink.load_links(links_path)["m"] == "go/mail"
+    finally:
+        httpd.shutdown()
+
+
+def test_absolute_go_url_is_an_alias():
+    links = {"pnc": "https://cs.cmu.edu/pnc", "15259": "http://go/pnc"}
+    assert golink.resolve(links, "/15259/hw") == "https://cs.cmu.edu/pnc/hw"
+    assert golink.matched_key(links, "/15259") == "pnc"
+
+
+def test_leading_slash_form_is_an_alias():
+    links = {"a": "https://a.com", "b": "/a"}
+    assert golink.resolve(links, "/b") == "https://a.com"
+
+
+def test_real_url_is_not_mistaken_for_an_alias():
+    assert not golink.is_alias("https://google.com/go/foo")
+
+
+def test_canonical_keeps_its_aliases_over_a_shorter_name(tmp_path):
+    p = tmp_path / "links.json"
+    golink.save_links(p, {"05-391": "https://c.com/x", "05391": "go/05-391",
+                          "dhcs": "https://c.com/x"})
+    golink.main(["--links", str(p), "add", "zz", "https://c.com/x"])
+    # 05-391 already owns an alias, so it stays canonical even though
+    # "dhcs" is a shorter name.
+    assert golink.load_links(p)["zz"] == "go/05-391"
+
+
+def test_bare_existing_name_in_url_box_makes_alias(tmp_path):
+    p = tmp_path / "links.json"
+    golink.main(["--links", str(p), "add", "pnc", "https://cs.cmu.edu/pnc"])
+    golink.main(["--links", str(p), "add", "15259", "pnc"])
+    assert golink.load_links(p)["15259"] == "go/pnc"
+
+
+def test_bare_unknown_name_is_not_an_alias(tmp_path):
+    links = {"pnc": "https://cs.cmu.edu/pnc"}
+    assert golink.as_alias_input(links, "nope") is None
+
+
+def test_bare_domain_is_still_a_url(tmp_path):
+    links = {"pnc": "https://cs.cmu.edu/pnc", "example.com": "https://x.com"}
+    assert golink.as_alias_input(links, "example.com") is None
+
+
+def test_post_bare_name_makes_alias(tmp_path):
+    httpd, port, links_path = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("POST", "/", "name=m&url=mail",
+                     {"Content-Type": "application/x-www-form-urlencoded"})
+        conn.getresponse().read()
+        assert golink.load_links(links_path)["m"] == "go/mail"
+    finally:
+        httpd.shutdown()
+
+
+# --- omnibox integration ---------------------------------------------
+
+SUGGEST_LINKS = {
+    "mail": "https://mail.google.com",
+    "markel": "go/76-270/markel",
+    "76-270": "https://canvas.cmu.edu/270",
+    "76-270/markel": "https://markel.example.com",
+    "me": "https://bryan-yung.com",
+}
+SUGGEST_COUNTS = {"mail": 9, "me": 2, "76-270/markel": 5}
+
+
+def test_suggest_prefix_matches_beat_substring():
+    q, names, targets, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "ma")
+    assert q == "ma"
+    assert names[:2] == ["mail", "markel"]  # prefix first, most-used first
+
+
+def test_suggest_includes_aliases_and_their_target():
+    _, names, targets, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "markel")
+    # the alias leads (prefix match); the canonical is offered too (substring)
+    assert names == ["markel", "76-270/markel"]
+    # an alias advertises the URL it actually lands on
+    assert targets == ["https://markel.example.com"] * 2
+
+
+def test_suggest_substring_still_offered():
+    _, names, _, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "270")
+    assert "76-270" in names
+
+
+def test_suggest_empty_query_lists_most_used_first():
+    _, names, _, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "")
+    assert names[0] == "mail"
+
+
+def test_suggest_respects_limit():
+    links = {f"n{i}": "https://x.com" for i in range(30)}
+    _, names, _, _ = golink.suggest(links, {}, "n", limit=10)
+    assert len(names) == 10
+
+
+def test_opensearch_descriptor_served(tmp_path):
+    httpd, port, _ = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/_opensearch.xml")
+        resp = conn.getresponse()
+        body = resp.read().decode()
+        assert resp.status == 200
+        assert resp.getheader("Content-Type") == "application/opensearchdescription+xml"
+        assert "http://go/{searchTerms}" in body
+        assert "application/x-suggestions+json" in body
+    finally:
+        httpd.shutdown()
+
+
+def test_suggest_endpoint_returns_json(tmp_path):
+    httpd, port, _ = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/_suggest?q=ma")
+        resp = conn.getresponse()
+        payload = json.loads(resp.read().decode())
+        assert resp.status == 200
+        assert resp.getheader("Content-Type") == "application/x-suggestions+json"
+        assert payload[0] == "ma"
+        assert payload[1] == ["mail"]
+    finally:
+        httpd.shutdown()
+
+
+def test_page_advertises_the_descriptor(tmp_path):
+    httpd, port, _ = _start_server(tmp_path)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/")
+        body = conn.getresponse().read().decode()
+        assert 'rel="search"' in body and "/_opensearch.xml" in body
+    finally:
+        httpd.shutdown()
+
+
+def test_reserved_paths_do_not_shadow_links(tmp_path):
+    """A link is still reachable at its own name; only /_ paths are reserved."""
+    links = {"suggest": "https://example.com"}
+    assert golink.resolve(links, "/suggest") == "https://example.com"

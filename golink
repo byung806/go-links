@@ -24,7 +24,108 @@ def save_links(path: Path, links: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(links, indent=2, sort_keys=True) + "\n")
+    _keep_owner(tmp, path)
     os.replace(tmp, path)
+
+
+def _keep_owner(tmp: Path, path: Path) -> None:
+    """Keep the store owned by the human, not by the root daemon.
+
+    The resolver runs as root (port 80) and rewrites this file, which would
+    otherwise leave it root-owned and unwritable from the CLI.
+    """
+    try:
+        ref = path if path.exists() else path.parent
+        st = ref.stat()
+        if os.geteuid() == 0:
+            os.chown(tmp, st.st_uid, st.st_gid)
+    except (OSError, AttributeError):
+        pass  # best effort
+
+
+ALIAS_PREFIX = "go/"
+
+
+def _alias_body(value):
+    """The part after `go/` if `value` names another link, else None.
+
+    Accepts every spelling the UI invites: `go/x`, `http://go/x`, `//go/x`
+    and a bare `/x`.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    for prefix in ("https://", "http://", "//"):
+        if v.startswith(prefix):
+            v = v[len(prefix):]
+            break
+    if v.startswith(ALIAS_PREFIX):
+        return v[len(ALIAS_PREFIX):].strip("/")
+    if v.startswith("/") and "//" not in v:
+        return v.strip("/")
+    return None
+
+
+def is_alias(value) -> bool:
+    """An alias entry stores `go/<other-name>` instead of a URL."""
+    return _alias_body(value) is not None
+
+
+def alias_target(value: str) -> str:
+    """The link name an alias points at."""
+    return _alias_body(value)
+
+
+def _norm_url(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
+def as_alias_input(links: dict, value: str, adding: str = None):
+    """Read what was typed in the URL box as an alias, or None if it's a URL.
+
+    Accepts `go/x`, `http://go/x`, `/x`, and a bare `x` that names a link you
+    already have — a bare token can't be confused with a URL, since a real one
+    has a scheme or a dot in it.
+    """
+    body = _alias_body(value)
+    if body is None:
+        v = value.strip().strip("/")
+        if v and v != adding and "." not in v and ":" not in v and v in links:
+            body = v
+    return body or None
+
+
+def canonical_name(links: dict, name: str, _depth: int = 0):
+    """Follow an alias chain to the real link name (None if it dangles)."""
+    seen = set()
+    while name in links and is_alias(links[name]):
+        if name in seen:
+            return None  # alias cycle
+        seen.add(name)
+        name = alias_target(links[name])
+    return name if name in links else None
+
+
+def aliases_for(links: dict, name: str) -> list:
+    """Names that resolve to `name` through one or more alias hops."""
+    return sorted(k for k, v in links.items()
+                  if is_alias(v) and canonical_name(links, k) == name)
+
+
+def link_with_url(links: dict, url: str, exclude: str = None):
+    """An existing (non-alias) link already pointing at `url`, if there is one.
+
+    Adding a duplicate target folds into an alias instead of a second entry,
+    so the two names stay in sync from then on. Shortest name wins, since
+    that's the one most likely to be the "real" name.
+    """
+    target = _norm_url(url)
+    hits = [k for k, v in links.items()
+            if k != exclude and not is_alias(v) and _norm_url(v) == target]
+    if not hits:
+        return None
+    # A link that already owns aliases keeps them; otherwise the shortest name.
+    return min(hits, key=lambda k: (0 if aliases_for(links, k) else 1, len(k), k))
 
 
 def _match_key(links: dict, path: str):
@@ -43,10 +144,18 @@ def _match_key(links: dict, path: str):
     return None, None
 
 
-def resolve(links: dict, path: str):
+def resolve(links: dict, path: str, _depth: int = 0):
     key, rest = _match_key(links, path)
     if key is None:
         return None
+    if is_alias(links[key]):
+        if _depth > 10:
+            return None  # alias cycle
+        # Re-resolve under the canonical name so its own sub-links apply:
+        # go/76270/markel behaves exactly like go/76-270/markel.
+        sub = "/".join([alias_target(links[key])] + list(rest))
+        query = urlsplit(path).query
+        return resolve(links, "/" + sub + ("?" + query if query else ""), _depth + 1)
     target = links[key].rstrip("/")
     if rest:
         target = target + "/" + "/".join(rest)
@@ -57,8 +166,16 @@ def resolve(links: dict, path: str):
 
 
 def matched_key(links: dict, path: str):
-    """The link name a request resolves to (used for usage counting), or None."""
-    return _match_key(links, path)[0]
+    """The link name a request resolves to (used for usage counting), or None.
+
+    Hits through an alias are credited to the canonical link, so go/76270 and
+    go/76-270 share one count.
+    """
+    key, rest = _match_key(links, path)
+    if key is None or not is_alias(links[key]):
+        return key
+    sub = "/".join([alias_target(links[key])] + list(rest))
+    return matched_key(links, "/" + sub) if canonical_name(links, key) else None
 
 
 def counts_path_for(links_path) -> Path:
@@ -77,7 +194,7 @@ def bump_count(links_path, name: str) -> None:
     save_links(cpath, counts)
 
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 import html
 
@@ -90,6 +207,8 @@ PAGE_HEAD = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>go links</title>
+<link rel="search" type="application/opensearchdescription+xml"
+ href="/_opensearch.xml" title="go">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&display=swap" rel="stylesheet">
@@ -122,7 +241,7 @@ PAGE_HEAD = """<!doctype html>
  ul.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line);
   animation:fadein .5s both}
  @keyframes fadein{from{opacity:0}to{opacity:1}}
- li.row{display:flex;align-items:baseline;gap:16px;
+ li.row{display:flex;flex-wrap:wrap;align-items:baseline;gap:16px;
   padding:13px 12px;border-bottom:1px solid var(--line);transition:background .15s}
  li.row:hover{background:rgba(0,0,0,.015)}
  a.name{font-family:var(--mono);font-size:14px;text-decoration:none;
@@ -143,6 +262,18 @@ PAGE_HEAD = """<!doctype html>
   font-size:18px;line-height:1;padding:0 2px;opacity:0;transition:opacity .15s,color .15s}
  li.row:hover .del button,li.row:focus-within .del button{opacity:1}
  .del button:hover{color:#c0392b}
+ .aka{flex-basis:100%;order:9;margin:6px 0 0;display:flex;flex-wrap:wrap;
+  gap:6px;align-items:center;font-size:12px;color:var(--faint)}
+ .aka .lbl{font-style:italic}
+ .aka .chip{display:inline-flex;align-items:center;gap:3px;
+  font-family:var(--mono);font-size:12px;padding:1px 6px;border-radius:999px;
+  background:var(--green-bg);color:var(--green)}
+ .aka .chip form{margin:0;display:inline-flex}
+ .aka .chip button{border:0;background:none;color:inherit;cursor:pointer;
+  font-size:13px;line-height:1;padding:0;opacity:0;transition:opacity .15s}
+ li.row:hover .aka .chip button,li.row:focus-within .aka .chip button{opacity:.7}
+ .aka .chip button:hover{opacity:1;color:#c0392b}
+ .broken{color:#c0392b}
  .empty{color:var(--muted);padding:26px 2px;border-bottom:1px solid var(--line)}
  form.add{display:flex;gap:8px;margin:0 0 18px;flex-wrap:wrap}
  .name-field{display:flex;align-items:center;flex:0 0 160px;padding-left:11px;
@@ -174,7 +305,8 @@ PAGE_HEAD = """<!doctype html>
 <form class="add" method="post" action="/">
  <div class="name-field"><span class="go">go/</span>
   <input name="name" placeholder="name" required autocomplete="off" spellcheck="false"></div>
- <input class="url-in" name="url" type="url" placeholder="https://…" required autocomplete="off">
+ <input class="url-in" name="url" type="text" placeholder="https://… or go/name to alias it"
+  required autocomplete="off" spellcheck="false">
  <button type="submit">Add link</button>
 </form>
 <div class="search-wrap">
@@ -240,6 +372,52 @@ PAGE_FOOT = """</div>
 </body></html>"""
 
 
+# Reserved paths carry a leading underscore so they can't shadow a real link.
+OPENSEARCH_PATH = "/_opensearch.xml"
+SUGGEST_PATH = "/_suggest"
+
+OPENSEARCH_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+ <ShortName>go</ShortName>
+ <Description>go links</Description>
+ <InputEncoding>UTF-8</InputEncoding>
+ <Url type="text/html" method="get" template="http://go/{searchTerms}"/>
+ <Url type="application/x-suggestions+json" method="get"
+  template="http://go%s?q={searchTerms}"/>
+ <moz:SearchForm xmlns:moz="http://www.mozilla.org/2006/browser/search/"
+  >http://go/</moz:SearchForm>
+</OpenSearchDescription>
+""" % SUGGEST_PATH
+
+
+def suggest(links: dict, counts: dict, q: str, limit: int = 10) -> list:
+    """OpenSearch JSON suggestions: [query, [names], [targets], []].
+
+    Names that start with the query come first, then names containing it;
+    within each, the most-used links win. Aliases are offered like any other
+    name — typing "76" should reach the course whichever way you spell it.
+    """
+    q = q.strip().lstrip("/").lower()
+    starts, contains = [], []
+    for name in links:
+        low = name.lower()
+        if q and low.startswith(q):
+            starts.append(name)
+        elif q and q in low:
+            contains.append(name)
+        elif not q:
+            starts.append(name)
+
+    def rank(name):
+        canon = canonical_name(links, name) or name
+        return (-counts.get(canon, 0), len(name), name)
+
+    names = sorted(starts, key=rank) + sorted(contains, key=rank)
+    names = names[:limit]
+    targets = [resolve(links, "/" + n) or "" for n in names]
+    return [q, names, targets, []]
+
+
 COPY_SVG = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
             'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
             'stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/>'
@@ -255,19 +433,64 @@ def _display_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def _alias_chips(links: dict, name: str) -> str:
+    """The `also go/x go/y` line shown under a link that has aliases."""
+    names = aliases_for(links, name)
+    if not names:
+        return ""
+    chips = ""
+    for a in names:
+        a_esc = html.escape(a)
+        chips += (
+            f'<span class="chip">go/{a_esc}'
+            '<form class="del" method="post" action="/delete">'
+            f'<input type="hidden" name="name" value="{a_esc}">'
+            f'<button type="submit" aria-label="Remove alias go/{a_esc}" '
+            'title="Remove alias">&times;</button></form></span>'
+        )
+    indent = name.count("/") * 16
+    return (f'<span class="aka" style="padding-left:{indent}px">'
+            f'<span class="lbl">also</span>{chips}</span>')
+
+
 def _render(links: dict, counts: dict) -> bytes:
-    n = len(links)
-    sub = f'<p class="sub"><b id="count">{n}</b> shortcut{"" if n == 1 else "s"}</p>'
+    n = sum(1 for v in links.values() if not is_alias(v))
+    n_alias = sum(1 for k, v in links.items()
+                  if is_alias(v) and canonical_name(links, k))
+    sub = f'<p class="sub"><b id="count">{n}</b> shortcut{"" if n == 1 else "s"}'
+    if n_alias:
+        sub += f' &middot; <b>{n_alias}</b> alias{"" if n_alias == 1 else "es"}'
+    sub += '</p>'
     if not links:
         middle = sub + '<p class="empty">No shortcuts yet. Add one below.</p>'
         return (PAGE_HEAD + middle + PAGE_FOOT).encode()
 
     rows = ""
     for name in sorted(links):
+        value = links[name]
+        if is_alias(value):
+            if canonical_name(links, name):
+                continue  # shown as a chip under its canonical link
+            # Dangling alias — surface it so it can be fixed or deleted.
+            n_esc = html.escape(name)
+            tgt = html.escape(alias_target(value))
+            search = html.escape((name + " " + tgt).lower(), quote=True)
+            rows += (
+                f'<li class="row" data-name="{n_esc}" data-search="{search}">'
+                f'<span class="name"><span class="go">go/</span>{n_esc}</span>'
+                f'<span class="target broken">alias to go/{tgt} (missing)</span>'
+                '<span class="hits zero">0</span>'
+                '<form class="del" method="post" action="/delete">'
+                f'<input type="hidden" name="name" value="{n_esc}">'
+                f'<button type="submit" aria-label="Delete go/{n_esc}">&times;</button>'
+                '</form></li>'
+            )
+            continue
         c = counts.get(name, 0)
         n_esc = html.escape(name)
-        disp = _display_url(links[name])
-        search = html.escape((name + " " + disp).lower(), quote=True)
+        disp = _display_url(value)
+        akas = aliases_for(links, name)
+        search = html.escape((" ".join([name] + akas) + " " + disp).lower(), quote=True)
         indent = name.count("/") * 16
         rows += (
             f'<li class="row" data-name="{n_esc}" data-search="{search}">'
@@ -280,7 +503,7 @@ def _render(links: dict, counts: dict) -> bytes:
             '<form class="del" method="post" action="/delete">'
             f'<input type="hidden" name="name" value="{n_esc}">'
             f'<button type="submit" aria-label="Delete go/{n_esc}">&times;</button>'
-            '</form></li>'
+            '</form>' + _alias_chips(links, name) + '</li>'
         )
     middle = (sub + f'<ul class="rows">{rows}</ul>'
               '<p class="empty" id="nomatch" style="display:none">No matches.</p>')
@@ -297,8 +520,26 @@ def make_handler(links_path):
             self.send_header("Location", location)
             self.end_headers()
 
+        def _send(self, body: bytes, ctype: str, code: int = 200):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             links = load_links(links_path)
+            path_only = urlsplit(self.path).path
+            if path_only == OPENSEARCH_PATH:
+                self._send(OPENSEARCH_XML.encode(),
+                           "application/opensearchdescription+xml")
+                return
+            if path_only == SUGGEST_PATH:
+                q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
+                counts = load_counts(counts_path_for(links_path))
+                body = json.dumps(suggest(links, counts, q)).encode()
+                self._send(body, "application/x-suggestions+json")
+                return
             if self.path == "/" or self.path.startswith("/?"):
                 counts = load_counts(counts_path_for(links_path))
                 body = _render(links, counts)
@@ -333,9 +574,18 @@ def make_handler(links_path):
                 save_links(links_path, links)
                 self._redirect("/", 303)
                 return
-            name = form.get("name", "").strip()
+            name = form.get("name", "").strip().strip("/")
             url = form.get("url", "").strip()
             if name and url:
+                typed_alias = as_alias_input(links, url, adding=name)
+                if typed_alias:
+                    url = ALIAS_PREFIX + typed_alias
+                if is_alias(url) and alias_target(url) == name:
+                    self._redirect("/", 303)  # refuse a self-alias
+                    return
+                twin = link_with_url(links, url, exclude=name)
+                if twin and not is_alias(url):
+                    url = ALIAS_PREFIX + twin  # same target -> alias, not a copy
                 links[name] = url
                 save_links(links_path, links)
             self._redirect("/", 303)
@@ -344,7 +594,10 @@ def make_handler(links_path):
 
 
 def serve(host: str, port: int, links_path) -> None:
-    httpd = HTTPServer((host, port), make_handler(links_path))
+    # Threaded: a browser that opens a socket speculatively (Chrome preconnect)
+    # would otherwise block every later request on a single-threaded server.
+    httpd = ThreadingHTTPServer((host, port), make_handler(links_path))
+    httpd.daemon_threads = True
     httpd.serve_forever()
 
 
@@ -354,11 +607,46 @@ import sys
 
 def cmd_add(args):
     name = args.name.strip("/")
+    url = args.url.strip()
     links = load_links(args.links)
-    links[name] = args.url
+    typed_alias = as_alias_input(links, url, adding=name)
+    if typed_alias:
+        url = ALIAS_PREFIX + typed_alias
+    if is_alias(url):
+        return _set_alias(args.links, links, name, alias_target(url))
+    twin = link_with_url(links, url, exclude=name)
+    if twin:
+        return _set_alias(args.links, links, name, twin)
+    links[name] = url
     save_links(args.links, links)
-    print(f"added {name} -> {args.url}")
+    print(f"added {name} -> {url}")
     return 0
+
+
+def _set_alias(links_path, links: dict, name: str, target: str) -> int:
+    """Point `name` at an existing link `target`."""
+    target = target.strip()
+    if target.startswith(ALIAS_PREFIX):
+        target = target[len(ALIAS_PREFIX):]
+    target = target.strip("/")
+    if name == target:
+        print(f"{name} cannot alias itself", file=sys.stderr)
+        return 1
+    if target not in links:
+        print(f"no such link to alias: {target}", file=sys.stderr)
+        return 1
+    links[name] = ALIAS_PREFIX + target
+    if canonical_name(links, name) is None:
+        print(f"{name} -> {target} would make an alias cycle", file=sys.stderr)
+        return 1
+    save_links(links_path, links)
+    print(f"aliased {name} -> go/{target}")
+    return 0
+
+
+def cmd_alias(args):
+    links = load_links(args.links)
+    return _set_alias(args.links, links, args.name.strip("/"), args.target)
 
 
 def cmd_rm(args):
@@ -383,8 +671,16 @@ def cmd_list(args):
     counts = load_counts(counts_path_for(args.links))
     width = max(len(n) for n in links)
     for name in sorted(links):
+        value = links[name]
+        if is_alias(value):
+            if canonical_name(links, name):
+                continue  # listed under its canonical link
+            print(f"{name.ljust(width)} {'':5}  -> go/{alias_target(value)} (missing)")
+            continue
         hits = str(counts.get(name, 0)).rjust(5)
-        print(f"{name.ljust(width)} {hits}  {links[name]}")
+        print(f"{name.ljust(width)} {hits}  {value}")
+        for a in aliases_for(links, name):
+            print(f"{' ' * width} {'':5}  aka go/{a}")
     return 0
 
 
@@ -407,6 +703,11 @@ def build_parser():
     r = sub.add_parser("rm", help="remove a link")
     r.add_argument("name")
     r.set_defaults(func=cmd_rm)
+
+    al = sub.add_parser("alias", help="point a second name at an existing link")
+    al.add_argument("name")
+    al.add_argument("target", help="existing link name (go/ prefix optional)")
+    al.set_defaults(func=cmd_alias)
 
     l = sub.add_parser("list", help="list links")
     l.set_defaults(func=cmd_list)
