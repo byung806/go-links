@@ -195,31 +195,9 @@ def bump_count(links_path, name: str) -> None:
 
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs
 import html
 
-
-# With go/ set as Chrome's default search engine, anything that isn't a link
-# is a search: `go/alex` resolves, `go/how tall is everest` falls through to
-# here. Override by adding a link named `_search` whose URL contains %s.
-SEARCH_KEY = "_search"
-DEFAULT_SEARCH = "https://www.google.com/search?q=%s"
-
-
-def search_url(links: dict, terms: str) -> str:
-    template = links.get(SEARCH_KEY) or DEFAULT_SEARCH
-    if "%s" not in template:
-        template = template.rstrip("/") + "/%s"
-    return template.replace("%s", quote(terms, safe=""))
-
-
-def search_terms(path: str) -> str:
-    """What the user actually typed, recovered from the request path."""
-    parts = urlsplit(path)
-    terms = unquote(parts.path).lstrip("/")
-    if parts.query:
-        terms += "?" + unquote(parts.query)
-    return terms.strip()
 
 
 # Design language borrowed from bryan-yung.com: warm paper, Libre Baskerville
@@ -393,6 +371,22 @@ PAGE_FOOT = """</div>
 </body></html>"""
 
 
+# The extension reads this to build omnibox suggestions and to keep its
+# bookmark folder in sync. Underscored so it can't shadow a real link.
+LINKS_API_PATH = "/_links"
+
+
+def links_api(links: dict) -> list:
+    """Every reachable name, aliases included, with where it lands."""
+    out = []
+    for name in sorted(links):
+        target = resolve(links, "/" + name)
+        if target:
+            out.append({"name": name, "url": target,
+                        "alias": is_alias(links[name])})
+    return out
+
+
 COPY_SVG = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
             'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
             'stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/>'
@@ -429,7 +423,7 @@ def _alias_chips(links: dict, name: str) -> str:
 
 
 def _render(links: dict, counts: dict) -> bytes:
-    n = sum(1 for k, v in links.items() if not is_alias(v) and k != SEARCH_KEY)
+    n = sum(1 for v in links.values() if not is_alias(v))
     n_alias = sum(1 for k, v in links.items()
                   if is_alias(v) and canonical_name(links, k))
     sub = f'<p class="sub"><b id="count">{n}</b> shortcut{"" if n == 1 else "s"}'
@@ -442,8 +436,6 @@ def _render(links: dict, counts: dict) -> bytes:
 
     rows = ""
     for name in sorted(links):
-        if name == SEARCH_KEY:
-            continue
         value = links[name]
         if is_alias(value):
             if canonical_name(links, name):
@@ -506,6 +498,11 @@ def make_handler(links_path):
 
         def do_GET(self):
             links = load_links(links_path)
+            path_only = urlsplit(self.path).path
+            if path_only == LINKS_API_PATH:
+                body = json.dumps(links_api(links)).encode()
+                self._send(body, "application/json")
+                return
             if self.path == "/" or self.path.startswith("/?"):
                 counts = load_counts(counts_path_for(links_path))
                 body = _render(links, counts)
@@ -515,17 +512,10 @@ def make_handler(links_path):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path == "/favicon.ico":
-                self._send(b"", "image/x-icon", 404)
-                return
             target = resolve(links, self.path)
             if target is None:
-                terms = search_terms(self.path)
-                if not terms:
-                    self._send(b"404 no such go link\n",
-                               "text/plain; charset=utf-8", 404)
-                    return
-                self._redirect(search_url(links, terms), 302)
+                self._send(b"404 no such go link\n",
+                           "text/plain; charset=utf-8", 404)
                 return
             bump_count(links_path, matched_key(links, self.path))
             self._redirect(target, 302)

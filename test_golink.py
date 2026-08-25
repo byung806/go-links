@@ -149,15 +149,14 @@ def test_get_known_redirects(tmp_path):
         httpd.shutdown()
 
 
-def test_get_unknown_falls_through_to_search(tmp_path):
+def test_get_unknown_404(tmp_path):
     httpd, port, _ = _start_server(tmp_path)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port)
         conn.request("GET", "/nope")
         resp = conn.getresponse()
         resp.read()
-        assert resp.status == 302
-        assert resp.getheader("Location") == "https://www.google.com/search?q=nope"
+        assert resp.status == 404
     finally:
         httpd.shutdown()
 
@@ -567,70 +566,30 @@ def test_post_bare_name_makes_alias(tmp_path):
         httpd.shutdown()
 
 
-# --- go/ as the default search engine ---------------------------------
+# --- the API the extension reads --------------------------------------
 
-def test_search_url_escapes_terms():
-    assert golink.search_url({}, "how tall") == \
-        "https://www.google.com/search?q=how%20tall"
-
-
-def test_search_terms_decodes_a_typed_query():
-    assert golink.search_terms("/how%20tall%20is%20everest") == "how tall is everest"
-
-
-def test_search_terms_keeps_a_question_mark_query():
-    assert golink.search_terms("/who?why") == "who?why"
+def test_links_api_lists_names_with_final_targets():
+    links = {"76-270": "https://canvas.cmu.edu/270", "76270": "go/76-270"}
+    rows = golink.links_api(links)
+    assert {r["name"] for r in rows} == {"76-270", "76270"}
+    assert all(r["url"] == "https://canvas.cmu.edu/270" for r in rows)
+    assert [r["alias"] for r in rows] == [False, True]
 
 
-def test_search_engine_is_overridable():
-    links = {"_search": "https://duckduckgo.com/?q=%s"}
-    assert golink.search_url(links, "x") == "https://duckduckgo.com/?q=x"
+def test_links_api_skips_dangling_aliases():
+    assert golink.links_api({"b": "go/gone"}) == []
 
 
-def test_search_template_without_placeholder_appends():
-    links = {"_search": "https://example.com/find"}
-    assert golink.search_url(links, "x") == "https://example.com/find/x"
-
-
-def test_links_still_win_over_search(tmp_path):
+def test_links_endpoint_served(tmp_path):
     httpd, port, _ = _start_server(tmp_path)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/mail")
+        conn.request("GET", "/_links")
         resp = conn.getresponse()
-        resp.read()
-        assert resp.getheader("Location") == "https://mail.google.com"
+        rows = json.loads(resp.read().decode())
+        assert resp.status == 200
+        assert resp.getheader("Content-Type") == "application/json"
+        assert rows == [{"name": "mail", "url": "https://mail.google.com",
+                         "alias": False}]
     finally:
         httpd.shutdown()
-
-
-def test_multiword_search_redirects(tmp_path):
-    httpd, port, _ = _start_server(tmp_path)
-    try:
-        conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/how%20tall%20is%20everest")
-        resp = conn.getresponse()
-        resp.read()
-        assert resp.getheader("Location") == \
-            "https://www.google.com/search?q=how%20tall%20is%20everest"
-    finally:
-        httpd.shutdown()
-
-
-def test_favicon_is_not_a_search(tmp_path):
-    httpd, port, _ = _start_server(tmp_path)
-    try:
-        conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/favicon.ico")
-        resp = conn.getresponse()
-        resp.read()
-        assert resp.status == 404
-    finally:
-        httpd.shutdown()
-
-
-def test_search_key_is_not_listed_as_a_shortcut():
-    body = golink._render({"_search": "https://ddg.gg/?q=%s",
-                           "mail": "https://mail.google.com"}, {}).decode()
-    assert "_search" not in body
-    assert "<b id=\"count\">1</b>" in body
