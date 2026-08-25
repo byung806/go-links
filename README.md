@@ -70,8 +70,13 @@ It gives you two things, both read live from `go/_links` — nothing is a snapsh
   `go/<name>`. Chrome matches bookmarks by title, so typing a bare `alex`
   surfaces `go/alex` in the normal dropdown — while Google stays your default
   search engine and its suggestions keep working. Re-synced every 5 minutes
-  and on browser start; renamed links update, deleted links disappear. If the
-  daemon is down a sync is skipped, leaving existing bookmarks untouched.
+  and on browser start, and immediately whenever you add or delete a link on
+  the go/ page; renamed links update, deleted links disappear. If the daemon
+  is down a sync is skipped, leaving existing bookmarks untouched.
+
+The extension isn't a running process — Manifest V3 service workers are
+event-driven, so Chrome starts it for a keystroke, a page ping, or the alarm,
+then shuts it down. Nothing to keep alive, nothing to restart.
 
 The endpoint it reads is plain JSON, aliases resolved to their final target:
 

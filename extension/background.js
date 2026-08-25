@@ -109,6 +109,13 @@ chrome.runtime.onInstalled.addListener(() => {
   syncBookmarks();
 });
 chrome.runtime.onStartup.addListener(syncBookmarks);
+// The go/ page pings us after any add or delete, so UI edits land at once
+// instead of waiting for the next alarm.
+chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
+  if (msg?.type !== "sync") return;
+  syncBookmarks().then(() => respond({ ok: true }));
+  return true; // respond asynchronously
+});
 chrome.alarms.onAlarm.addListener((a) => a.name === "sync" && syncBookmarks());
 }
 

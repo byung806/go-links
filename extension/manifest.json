@@ -3,8 +3,29 @@
   "name": "go links",
   "version": "1.0",
   "description": "Omnibox suggestions for your local go/ links, and a bookmark folder kept in sync with them.",
-  "permissions": ["bookmarks", "alarms", "storage"],
-  "host_permissions": ["http://go/*"],
-  "background": { "service_worker": "background.js" },
-  "omnibox": { "keyword": "go" }
+  "permissions": [
+    "bookmarks",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://go/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "omnibox": {
+    "keyword": "go"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://go/*"
+      ],
+      "js": [
+        "onpage.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }
