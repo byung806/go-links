@@ -149,13 +149,15 @@ def test_get_known_redirects(tmp_path):
         httpd.shutdown()
 
 
-def test_get_unknown_404(tmp_path):
+def test_get_unknown_falls_through_to_search(tmp_path):
     httpd, port, _ = _start_server(tmp_path)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port)
         conn.request("GET", "/nope")
         resp = conn.getresponse()
-        assert resp.status == 404
+        resp.read()
+        assert resp.status == 302
+        assert resp.getheader("Location") == "https://www.google.com/search?q=nope"
     finally:
         httpd.shutdown()
 
@@ -565,90 +567,70 @@ def test_post_bare_name_makes_alias(tmp_path):
         httpd.shutdown()
 
 
-# --- omnibox integration ---------------------------------------------
+# --- go/ as the default search engine ---------------------------------
 
-SUGGEST_LINKS = {
-    "mail": "https://mail.google.com",
-    "markel": "go/76-270/markel",
-    "76-270": "https://canvas.cmu.edu/270",
-    "76-270/markel": "https://markel.example.com",
-    "me": "https://bryan-yung.com",
-}
-SUGGEST_COUNTS = {"mail": 9, "me": 2, "76-270/markel": 5}
+def test_search_url_escapes_terms():
+    assert golink.search_url({}, "how tall") == \
+        "https://www.google.com/search?q=how%20tall"
 
 
-def test_suggest_prefix_matches_beat_substring():
-    q, names, targets, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "ma")
-    assert q == "ma"
-    assert names[:2] == ["mail", "markel"]  # prefix first, most-used first
+def test_search_terms_decodes_a_typed_query():
+    assert golink.search_terms("/how%20tall%20is%20everest") == "how tall is everest"
 
 
-def test_suggest_includes_aliases_and_their_target():
-    _, names, targets, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "markel")
-    # the alias leads (prefix match); the canonical is offered too (substring)
-    assert names == ["markel", "76-270/markel"]
-    # an alias advertises the URL it actually lands on
-    assert targets == ["https://markel.example.com"] * 2
+def test_search_terms_keeps_a_question_mark_query():
+    assert golink.search_terms("/who?why") == "who?why"
 
 
-def test_suggest_substring_still_offered():
-    _, names, _, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "270")
-    assert "76-270" in names
+def test_search_engine_is_overridable():
+    links = {"_search": "https://duckduckgo.com/?q=%s"}
+    assert golink.search_url(links, "x") == "https://duckduckgo.com/?q=x"
 
 
-def test_suggest_empty_query_lists_most_used_first():
-    _, names, _, _ = golink.suggest(SUGGEST_LINKS, SUGGEST_COUNTS, "")
-    assert names[0] == "mail"
+def test_search_template_without_placeholder_appends():
+    links = {"_search": "https://example.com/find"}
+    assert golink.search_url(links, "x") == "https://example.com/find/x"
 
 
-def test_suggest_respects_limit():
-    links = {f"n{i}": "https://x.com" for i in range(30)}
-    _, names, _, _ = golink.suggest(links, {}, "n", limit=10)
-    assert len(names) == 10
-
-
-def test_opensearch_descriptor_served(tmp_path):
+def test_links_still_win_over_search(tmp_path):
     httpd, port, _ = _start_server(tmp_path)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/_opensearch.xml")
+        conn.request("GET", "/mail")
         resp = conn.getresponse()
-        body = resp.read().decode()
-        assert resp.status == 200
-        assert resp.getheader("Content-Type") == "application/opensearchdescription+xml"
-        assert "http://go/{searchTerms}" in body
-        assert "application/x-suggestions+json" in body
+        resp.read()
+        assert resp.getheader("Location") == "https://mail.google.com"
     finally:
         httpd.shutdown()
 
 
-def test_suggest_endpoint_returns_json(tmp_path):
+def test_multiword_search_redirects(tmp_path):
     httpd, port, _ = _start_server(tmp_path)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/_suggest?q=ma")
+        conn.request("GET", "/how%20tall%20is%20everest")
         resp = conn.getresponse()
-        payload = json.loads(resp.read().decode())
-        assert resp.status == 200
-        assert resp.getheader("Content-Type") == "application/x-suggestions+json"
-        assert payload[0] == "ma"
-        assert payload[1] == ["mail"]
+        resp.read()
+        assert resp.getheader("Location") == \
+            "https://www.google.com/search?q=how%20tall%20is%20everest"
     finally:
         httpd.shutdown()
 
 
-def test_page_advertises_the_descriptor(tmp_path):
+def test_favicon_is_not_a_search(tmp_path):
     httpd, port, _ = _start_server(tmp_path)
     try:
         conn = http.client.HTTPConnection("127.0.0.1", port)
-        conn.request("GET", "/")
-        body = conn.getresponse().read().decode()
-        assert 'rel="search"' in body and "/_opensearch.xml" in body
+        conn.request("GET", "/favicon.ico")
+        resp = conn.getresponse()
+        resp.read()
+        assert resp.status == 404
     finally:
         httpd.shutdown()
 
 
-def test_reserved_paths_do_not_shadow_links(tmp_path):
-    """A link is still reachable at its own name; only /_ paths are reserved."""
-    links = {"suggest": "https://example.com"}
-    assert golink.resolve(links, "/suggest") == "https://example.com"
+def test_search_key_is_not_listed_as_a_shortcut():
+    body = golink._render({"_search": "https://ddg.gg/?q=%s",
+                           "mail": "https://mail.google.com"}, {}).decode()
+    assert "_search" not in body
+    assert "<b id=\"count\">1</b>" in body

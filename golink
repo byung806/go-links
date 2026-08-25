@@ -195,8 +195,31 @@ def bump_count(links_path, name: str) -> None:
 
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, unquote
 import html
+
+
+# With go/ set as Chrome's default search engine, anything that isn't a link
+# is a search: `go/alex` resolves, `go/how tall is everest` falls through to
+# here. Override by adding a link named `_search` whose URL contains %s.
+SEARCH_KEY = "_search"
+DEFAULT_SEARCH = "https://www.google.com/search?q=%s"
+
+
+def search_url(links: dict, terms: str) -> str:
+    template = links.get(SEARCH_KEY) or DEFAULT_SEARCH
+    if "%s" not in template:
+        template = template.rstrip("/") + "/%s"
+    return template.replace("%s", quote(terms, safe=""))
+
+
+def search_terms(path: str) -> str:
+    """What the user actually typed, recovered from the request path."""
+    parts = urlsplit(path)
+    terms = unquote(parts.path).lstrip("/")
+    if parts.query:
+        terms += "?" + unquote(parts.query)
+    return terms.strip()
 
 
 # Design language borrowed from bryan-yung.com: warm paper, Libre Baskerville
@@ -207,8 +230,6 @@ PAGE_HEAD = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>go links</title>
-<link rel="search" type="application/opensearchdescription+xml"
- href="/_opensearch.xml" title="go">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:wght@400;700&display=swap" rel="stylesheet">
@@ -372,52 +393,6 @@ PAGE_FOOT = """</div>
 </body></html>"""
 
 
-# Reserved paths carry a leading underscore so they can't shadow a real link.
-OPENSEARCH_PATH = "/_opensearch.xml"
-SUGGEST_PATH = "/_suggest"
-
-OPENSEARCH_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
- <ShortName>go</ShortName>
- <Description>go links</Description>
- <InputEncoding>UTF-8</InputEncoding>
- <Url type="text/html" method="get" template="http://go/{searchTerms}"/>
- <Url type="application/x-suggestions+json" method="get"
-  template="http://go%s?q={searchTerms}"/>
- <moz:SearchForm xmlns:moz="http://www.mozilla.org/2006/browser/search/"
-  >http://go/</moz:SearchForm>
-</OpenSearchDescription>
-""" % SUGGEST_PATH
-
-
-def suggest(links: dict, counts: dict, q: str, limit: int = 10) -> list:
-    """OpenSearch JSON suggestions: [query, [names], [targets], []].
-
-    Names that start with the query come first, then names containing it;
-    within each, the most-used links win. Aliases are offered like any other
-    name — typing "76" should reach the course whichever way you spell it.
-    """
-    q = q.strip().lstrip("/").lower()
-    starts, contains = [], []
-    for name in links:
-        low = name.lower()
-        if q and low.startswith(q):
-            starts.append(name)
-        elif q and q in low:
-            contains.append(name)
-        elif not q:
-            starts.append(name)
-
-    def rank(name):
-        canon = canonical_name(links, name) or name
-        return (-counts.get(canon, 0), len(name), name)
-
-    names = sorted(starts, key=rank) + sorted(contains, key=rank)
-    names = names[:limit]
-    targets = [resolve(links, "/" + n) or "" for n in names]
-    return [q, names, targets, []]
-
-
 COPY_SVG = ('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
             'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
             'stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/>'
@@ -454,7 +429,7 @@ def _alias_chips(links: dict, name: str) -> str:
 
 
 def _render(links: dict, counts: dict) -> bytes:
-    n = sum(1 for v in links.values() if not is_alias(v))
+    n = sum(1 for k, v in links.items() if not is_alias(v) and k != SEARCH_KEY)
     n_alias = sum(1 for k, v in links.items()
                   if is_alias(v) and canonical_name(links, k))
     sub = f'<p class="sub"><b id="count">{n}</b> shortcut{"" if n == 1 else "s"}'
@@ -467,6 +442,8 @@ def _render(links: dict, counts: dict) -> bytes:
 
     rows = ""
     for name in sorted(links):
+        if name == SEARCH_KEY:
+            continue
         value = links[name]
         if is_alias(value):
             if canonical_name(links, name):
@@ -529,17 +506,6 @@ def make_handler(links_path):
 
         def do_GET(self):
             links = load_links(links_path)
-            path_only = urlsplit(self.path).path
-            if path_only == OPENSEARCH_PATH:
-                self._send(OPENSEARCH_XML.encode(),
-                           "application/opensearchdescription+xml")
-                return
-            if path_only == SUGGEST_PATH:
-                q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
-                counts = load_counts(counts_path_for(links_path))
-                body = json.dumps(suggest(links, counts, q)).encode()
-                self._send(body, "application/x-suggestions+json")
-                return
             if self.path == "/" or self.path.startswith("/?"):
                 counts = load_counts(counts_path_for(links_path))
                 body = _render(links, counts)
@@ -549,14 +515,17 @@ def make_handler(links_path):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if self.path == "/favicon.ico":
+                self._send(b"", "image/x-icon", 404)
+                return
             target = resolve(links, self.path)
             if target is None:
-                msg = b"404 no such go link\n"
-                self.send_response(404)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(msg)))
-                self.end_headers()
-                self.wfile.write(msg)
+                terms = search_terms(self.path)
+                if not terms:
+                    self._send(b"404 no such go link\n",
+                               "text/plain; charset=utf-8", 404)
+                    return
+                self._redirect(search_url(links, terms), 302)
                 return
             bump_count(links_path, matched_key(links, self.path))
             self._redirect(target, 302)

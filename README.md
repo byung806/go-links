@@ -53,19 +53,31 @@ The canonical link owns the row on `go/`; its aliases show as chips underneath,
 and hits through any alias are counted on the canonical link. `rm <alias>`
 removes just that alias.
 
-## omnibox autocomplete
+## go/ as your default search engine
 
-Chrome won't learn `go/` URLs from history — every go link is a redirect, and
-Chrome remembers the destination, not the hop. So the resolver advertises
-itself as a search engine instead: visiting `go/` lets Chrome discover
-`go/_opensearch.xml`, which registers `go` as a keyword and points at a
-suggestions endpoint (`go/_suggest?q=`) that completes your link names,
-aliases included, ranked by hit count.
+The resolver falls through to a web search for anything that isn't a link, so
+it can be Chrome's default engine — then a bare `alex` in the address bar goes
+to `go/alex`, and `how tall is everest` goes to Google.
 
-Chrome files discovered engines under **Inactive shortcuts** in
-`chrome://settings/searchEngines` — activate `go` once, then `go` + Tab +
-`mail` works from the address bar. (Arc's omnibox re-offers what you typed,
-so it appears to work there without any of this.)
+`chrome://settings/searchEngines` → Site search → Add:
+
+    Name      go
+    Shortcut  go
+    URL       http://go/%s
+
+then ⋮ → Make default. (Chrome only offers custom-engine suggestions in
+keyword mode, which is why a bare name shows nothing until go/ *is* the
+default.)
+
+To search somewhere other than Google, add a link named `_search` whose URL
+contains `%s`:
+
+    ./golink add _search 'https://duckduckgo.com/?q=%s'
+
+It's hidden from the go/ list. Note the trade-off: with go/ as the default
+engine, every search you type goes through the local daemon, so if it's down
+the address bar errors instead of searching, and a typo like `mial` becomes a
+web search rather than a 404.
 
 ## uninstall
 
